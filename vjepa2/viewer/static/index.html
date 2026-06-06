@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>V-JEPA Run Viewer</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>V-JEPA Run Viewer</h1>
+        <p id="runMeta">Loading run...</p>
+      </div>
+      <label class="runPicker">
+        <span>Run</span>
+        <select id="runSelect"></select>
+      </label>
+    </header>
+
+    <nav class="tabs" aria-label="Viewer sections">
+      <button class="tab is-active" data-tab="home">Home</button>
+      <button class="tab" data-tab="examples">Examples</button>
+      <button class="tab" data-tab="population">Population</button>
+      <button class="tab" data-tab="inventory">Inventory</button>
+    </nav>
+
+    <main>
+      <section id="home" class="panel is-active">
+        <article class="home">
+          <p class="lede">
+            A hands-on explorer for one question: when a video shows something
+            <em>physically impossible</em> — an object passing through a wall, or
+            vanishing behind one and never coming back — does the AI notice? We
+            read out the model's own <strong>“surprise”</strong>: how wrong its
+            internal prediction of the next moment turns out to be. The most useful
+            part of this project isn't a single score — it's the
+            <strong>Explorer</strong>, where you can <em>watch</em> that surprise
+            light up on the actual frames.
+          </p>
+
+          <div id="homeStats" class="homeStats"></div>
+
+          <section class="homeBlock">
+            <h2>How to read the Explorer</h2>
+            <p style="margin:0 0 8px;color:var(--muted)">
+              Open the <strong>Examples</strong> tab and pick a scene. You get a
+              matched pair of clips — identical except for one physical event —
+              playing in lockstep, with the model's reaction drawn underneath.
+              Here's what each element means:
+            </p>
+            <ul>
+              <li>
+                <strong style="color:#2364aa">Possible clip (left)</strong> — the
+                physically normal version of the scene.
+              </li>
+              <li>
+                <strong style="color:#bd3c3c">Impossible clip (right)</strong> — the
+                same scene with one impossible event spliced in (a teleport, a
+                disappearance, an object passing through a solid block).
+              </li>
+              <li>
+                <strong>The surprise curves</strong> — under the videos, two lines
+                (<span style="color:#2364aa">blue = possible</span>,
+                <span style="color:#bd3c3c">red = impossible</span>) trace the
+                model's surprise <em>frame by frame</em>. A playhead rides both
+                curves as the clips play, so you can see <em>where in time</em>
+                surprise rises — or fails to.
+              </li>
+              <li>
+                <strong>Surprise heatmap</strong> (toggle it on) — paints each frame
+                with the model's surprise <em>per patch</em>, bright where the model
+                finds that part of the image most unexpected. This is the
+                centerpiece: it shows <em>what</em> the model is reacting to, not
+                just how much.
+              </li>
+              <li>
+                <strong style="color:#1f8a70">“Patches that differ” outlines</strong>
+                — mark the small region where the impossible event actually happens,
+                so you can compare it against where the heatmap lights up.
+              </li>
+              <li>
+                <strong style="color:#9a6a13">Pixel-diff band (orange)</strong> — a
+                faint band showing where the two clips simply differ in raw pixels.
+                It's an honesty check: that's what's <em>visually</em> different,
+                which is <em>not</em> necessarily where the physics breaks.
+              </li>
+            </ul>
+          </section>
+
+          <section class="homeBlock">
+            <h2>What you'll notice</h2>
+            <ul>
+              <li>
+                The surprise heatmap <strong>often does land on the right spot</strong>
+                — the place where the impossible thing happens — especially in
+                <strong>simple, uncluttered scenes</strong>. Watching that happen is
+                the most compelling part of the tool.
+              </li>
+              <li>
+                It's <strong>less reliable on harder scenes</strong>: more objects,
+                more motion, more occlusion. There the bright patches tend to drift
+                toward whatever is <em>moving</em> rather than whatever is
+                <em>impossible</em>.
+              </li>
+              <li>
+                That tension previews the headline result below — a lot of what
+                looks like “surprise at impossibility” turns out to be
+                <strong>surprise at motion and appearance</strong>.
+              </li>
+            </ul>
+          </section>
+
+          <section class="homeBlock">
+            <h2>The headline result, stated plainly</h2>
+            <p style="margin:0;color:#4a525e">
+              If you boil each clip down to a single surprise number and ask
+              “was the impossible clip more surprising than its possible twin?”,
+              the answer is <strong>basically a coin flip</strong>. Across 180
+              matched pairs the accuracy sits near <strong>chance (0.50)</strong>,
+              and which side of chance you land on depends only on how you average
+              the numbers. Control experiments (<code>NULL_CONTROLS.md</code>) show
+              the surprise tracks <strong>how much is moving</strong> in the frame
+              (r = 0.855 with raw motion energy) far more than whether physics was
+              violated. So as a yes/no “did it break physics?” detector, this
+              checkpoint <strong>does not work</strong> — and we report that
+              honestly. The Explorer is what makes the finding legible: you can
+              <em>see</em> the surprise following motion instead of impossibility.
+            </p>
+          </section>
+
+          <section class="homeBlock homeAddendum">
+            <h2>Addendum — a correction worth stating</h2>
+            <p style="margin:0;color:#4a525e">
+              Our first instinct was to call this a fact about the
+              <em>method</em>. It isn't. Two checks changed the story. First, when we
+              ran our exact scoring on the original authors' published surprise
+              numbers, we reproduced their <strong>~92% accuracy to the decimal</strong>
+              — so our analysis pipeline is sound. Second, the <em>same</em> network
+              architecture loaded with a different model's weights (V-JEPA 1, trained
+              on how-to videos) scores <strong>~92%</strong> on this very benchmark
+              under our pipeline. So the near-chance result is a fact about
+              <strong>this particular checkpoint (V-JEPA 2 ViT-L)</strong> — not about
+              the approach, the architecture, or world-models in general. The
+              “surprise = motion detector” story is true of the model we probed, and
+              the Explorer shows you exactly why. Full detail in
+              <code>CROSS_CHECK.md</code> and <code>RECONCILIATION.md</code>.
+            </p>
+          </section>
+
+          <p class="homeFoot">
+            Reproducibility, per SOUL.md: each run's command, commit, and notes live
+            on the <strong>Population</strong> tab's run header. Every number here
+            came from the model.
+          </p>
+        </article>
+      </section>
+
+      <section id="examples" class="panel">
+        <aside class="sidebar">
+          <div class="toolbar">
+            <input id="exampleFilter" type="search" placeholder="Filter pairs" />
+            <select id="metricSort"></select>
+          </div>
+          <div id="exampleList" class="list"></div>
+        </aside>
+        <section class="detail">
+          <div id="exampleDetail" class="empty">Select a pair.</div>
+        </section>
+      </section>
+
+      <section id="population" class="panel">
+        <div id="populationBody"></div>
+        <div id="populationEmpty" class="empty">No scored pairs in this run.</div>
+      </section>
+
+      <section id="inventory" class="panel">
+        <div class="inventoryTools">
+          <input id="inventoryFilter" type="search" placeholder="Filter inventory" />
+          <select id="inventoryView">
+            <option value="all">All cases</option>
+            <option value="motion">Motion-aligned candidates</option>
+            <option value="unreviewed">Needs human review</option>
+            <option value="metadata">Metadata issues</option>
+          </select>
+        </div>
+        <div id="inventoryBody"></div>
+        <div id="inventoryEmpty" class="empty">No inventory for this run.</div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

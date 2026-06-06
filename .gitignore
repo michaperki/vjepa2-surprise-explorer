@@ -1,0 +1,44 @@
+# =========================================================================
+# Lean site repo. Publishes:
+#   - docs/                  the self-contained GitHub Pages site
+#   - vjepa2/ (subset)       the research code + writeups behind it
+# Excludes Meta's upstream V-JEPA2 source tree (facebookresearch/vjepa2)
+# and all heavy / re-derivable artifacts.
+# =========================================================================
+
+# --- Heavy / re-derivable artifacts (never commit) ---
+# ~5 GB model weights
+vjepa2/checkpoints/
+# ~3.7 GB scratch experiments
+vjepa2/dev/
+# raw IntPhys clips
+vjepa2/data/
+# working run outputs; the slimmed published copy lives in docs/data/
+vjepa2/runs/
+
+# --- Exclude Meta's upstream tree under vjepa2/, then re-include only the
+#     research work. (vjepa2/* matches only direct children, so re-including a
+#     directory lets git descend into it.) ---
+vjepa2/*
+!vjepa2/viewer/
+!vjepa2/outputs/
+!vjepa2/figures/
+!vjepa2/surprise_engine.py
+!vjepa2/run_*.py
+!vjepa2/run_intphys_full.sh
+!vjepa2/*.md
+# ...but not Meta's top-level docs that *.md would otherwise re-include
+vjepa2/README.md
+vjepa2/CHANGELOG.md
+vjepa2/CONTRIBUTING.md
+vjepa2/CODE_OF_CONDUCT.md
+
+# --- Python / OS noise ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db

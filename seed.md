@@ -1,0 +1,1 @@
+clone the V-JEPA 2 repo, get a checkpoint running on a single clip, and reproduce one number or one qualitative result from the paper. Not build anything. Just stand the thing up and watch it predict. 
