@@ -310,6 +310,109 @@ class SurpriseEngine:
             pooled = h.float().mean(dim=1)
         return pooled.squeeze(0).cpu().numpy()
 
+    def latent_state(self, window_clip):
+        """One window's latent *state* + how many dimensions it actually uses.
+
+        Runs the target encoder over a full 16-frame window and returns:
+
+        - ``pooled`` — the mean over all tokens of the layer-normed target
+          representation (a single 1024-d point; the trajectory the latent-surface
+          viewer projects through time, one point per window).
+        - ``participation_ratio`` — the *effective number of dimensions* the token
+          cloud occupies, ``(Σλ)² / Σλ²`` over the eigen-spectrum of the centered
+          tokens. This is the collapse rail: a representation that has collapsed
+          (or that throws away structure during, say, an occlusion) spreads its
+          variance over *fewer* dimensions, so this number drops. It is label-free
+          and is the canonical identifiability read on collapse.
+
+        - ``spatial`` — the token grid averaged over the temporal slots, shape
+          ``(GRID_H * GRID_W, C)``. Differencing two clips' spatial fields gives a
+          per-patch divergence map (where on the frame the representations differ),
+          the spatial drill-down of the scalar divergence.
+
+        The window is the same 16-frame unit ``compute_surprise_split`` scores, so
+        a sliding-window sweep yields a latent trajectory on the exact timeline of
+        the dense surprise curve.
+        """
+        window = _as_tchw_tensor(window_clip)
+        if window.shape[0] != FRAMES_PER_CLIP:
+            raise ValueError(f"window_clip must contain {FRAMES_PER_CLIP} frames")
+        actual_x = self.transform(window).unsqueeze(0).to(self.device)
+        with torch.inference_mode(), self._autocast_context():
+            h = self.target_encoder(actual_x)
+            h = F.layer_norm(h, (h.size(-1),))
+            h = h.float().squeeze(0)  # (tokens, C)
+            pooled = h.mean(dim=0)
+            centered = h - pooled  # mean over tokens == pooled
+            # Singular values of the centered token matrix; eigenvalues of the
+            # token covariance are proportional to their squares, and the
+            # participation ratio is scale-free so the proportionality drops out.
+            sv = torch.linalg.svdvals(centered)
+            sq = sv * sv
+            pr = (sq.sum() ** 2) / (torch.clamp((sq * sq).sum(), min=1e-12))
+            # (tokens,C) -> (GRID_T, GRID_H*GRID_W, C) -> mean over time -> (HW, C)
+            spatial = h.view(GRID_T, GRID_H * GRID_W, h.size(-1)).mean(dim=0)
+        return pooled.cpu().numpy(), float(pr.item()), spatial.cpu().numpy()
+
+    def latent_features(self, window_clip):
+        """Everything the multi-view explorer needs from ONE 16-frame window, in a
+        single forward pass, so the analysis is captured once and never re-run:
+
+        - ``pooled`` (C,), ``participation_ratio`` (float), ``spatial`` (HW, C) —
+          as ``latent_state`` (state trajectory, collapse, per-patch field).
+        - ``per_slot`` (GRID_T, C) — the target representation pooled within each
+          temporal tubelet, for temporally-resolved trajectories/probes.
+        - ``per_layer`` (depth, C) — the layer-normed, token-pooled output of every
+          target-encoder block (via forward hooks), for "at what depth does a factor
+          become decodable" (layerwise emergence).
+        - ``z_pred`` (C,), ``h_target`` (C,) — pooled *predicted* future tokens (the
+          predictor's output) vs the *actual* future tokens, for the anticipation
+          view (predicted-vs-actual, the half of V-JEPA surprise hides).
+
+        Uses the fixed 8/8 context/target split (same as ``compute_surprise``)."""
+        context_x, actual_x = self._assemble_inputs(window_clip[:CONTEXT_FRAMES], window_clip[CONTEXT_FRAMES:])
+
+        layer_pooled: list = []
+
+        def _hook(_module, _inp, out):
+            a = out[0] if isinstance(out, tuple) else out
+            layer_pooled.append(F.layer_norm(a, (a.size(-1),)).float().mean(dim=1).squeeze(0).cpu().numpy())
+
+        handles = [blk.register_forward_hook(_hook) for blk in self.target_encoder.blocks]
+        try:
+            with torch.inference_mode(), self._autocast_context():
+                z_context = self.encoder(context_x, self.masks_enc)
+                z_pred = self.predictor(z_context, self.masks_enc, self.masks_pred)
+                h = self.target_encoder(actual_x)  # fires the per-layer hooks
+                h = F.layer_norm(h, (h.size(-1),))
+                h_target = torch.gather(
+                    h, dim=1, index=self.masks_pred.unsqueeze(-1).repeat(1, 1, h.size(-1))
+                )
+                hf = h.float().squeeze(0)  # (tokens, C)
+                pooled = hf.mean(dim=0)
+                centered = hf - pooled
+                sv = torch.linalg.svdvals(centered)
+                sq = sv * sv
+                pr = (sq.sum() ** 2) / torch.clamp((sq * sq).sum(), min=1e-12)
+                grid = hf.view(GRID_T, GRID_H * GRID_W, hf.size(-1))
+                spatial = grid.mean(dim=0)       # (HW, C)
+                per_slot = grid.mean(dim=1)       # (GRID_T, C)
+                z_pred_pooled = z_pred.float().squeeze(0).mean(dim=0)
+                h_target_pooled = h_target.float().squeeze(0).mean(dim=0)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        return {
+            "pooled": pooled.cpu().numpy(),
+            "pr": float(pr.item()),
+            "spatial": spatial.cpu().numpy(),
+            "per_slot": per_slot.cpu().numpy(),
+            "per_layer": np.stack(layer_pooled, axis=0),
+            "z_pred": z_pred_pooled.cpu().numpy(),
+            "h_target": h_target_pooled.cpu().numpy(),
+        }
+
 
 _DEFAULT_ENGINE = None
 

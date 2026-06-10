@@ -756,4 +756,389 @@ img {
   .curationGrid {
     grid-template-columns: 1fr;
   }
+
+  .latentTop {
+    grid-template-columns: 1fr;
+  }
+
+  .rails {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- latent_surface player --- */
+.latentHint {
+  font-size: 13px;
+  color: var(--muted, #5b6675);
+  margin: 4px 0 8px;
+  line-height: 1.45;
+}
+
+/* The PCA map rides in the same row as the videos. Videos hug their (small)
+   width on the left; the map takes the rest up to a sane cap. */
+.latentTop {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 360px);
+  gap: 16px;
+  align-items: start;
+  margin-top: 8px;
+}
+
+/* Exploratory views (latent / anticipation / dense): the clips are just a
+   reference to glance at — the analysis panels are the content. Keep the videos
+   small and height-capped so the panels are visible without scrolling. */
+.latentVideos {
+  grid-template-columns: auto auto;
+  justify-content: start;
+  align-items: start;
+  gap: 10px;
+}
+
+.latentVideos figure {
+  width: auto;
+}
+
+.latentVideos video {
+  width: auto;
+  height: min(19vh, 150px);
+  max-width: 38vw;
+}
+
+.latentVideos figcaption {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.pcaPanel {
+  width: 100%;
+  max-height: min(34vh, 300px);
+  aspect-ratio: 1 / 1;
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 6px;
+}
+
+/* Two rails per row so each is wide enough to read; one column on narrow. */
+.rails {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+
+/* A chart "card": an HTML caption (readable, wraps, doesn't scale) above the SVG
+   (which holds only the data). This is the fix for tiny/cut-off in-chart text. */
+.chartCard {
+  margin: 0;
+}
+
+.chartCard > figcaption {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--ink);
+  margin: 0 0 5px;
+}
+
+.chartCap {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--ink);
+  margin: 0 0 5px;
+}
+
+/* The few labels that must stay inside an SVG (axis ends) — keep them legible. */
+.svgAxis {
+  font-size: 13px;
+  fill: #5b6675;
+}
+
+.railChart {
+  width: 100%;
+  height: clamp(110px, 16vh, 150px);
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 6px;
+}
+
+.railTitle {
+  font-size: 11px;
+  fill: #5b6675;
+}
+
+.railPlay {
+  stroke: #444;
+  stroke-width: 1;
+}
+
+.nullBand {
+  fill: #8893a3;
+  opacity: 0.18;
+  stroke: none;
+}
+
+/* --- delta-direction views --- */
+.deltaLoadings {
+  margin-top: 12px;
+}
+
+.loadingsChart {
+  width: min(560px, 100%);
+  height: auto;
+}
+
+.deltaPop {
+  margin-top: 20px;
+  border-top: 1px solid #eceff3;
+  padding-top: 14px;
+}
+
+.deltaPop h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.deltaPopGrid {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.deltaScatter {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 6px;
+}
+
+.cosWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cosMatrix {
+  width: min(360px, 100%);
+  aspect-ratio: 1 / 1;
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 4px;
+}
+
+.cosReadout {
+  font-size: 13px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  min-height: 1.4em;
+}
+
+.cosBar {
+  width: min(300px, 100%);
+  height: auto;
+}
+
+@media (max-width: 720px) {
+  .deltaPopGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- multi-view explorer --- */
+.viewName {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted, #5b6675);
+}
+
+.viewSwitch {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 12px;
+  flex-wrap: wrap;
+}
+
+.viewTab {
+  padding: 5px 12px;
+  border: 1px solid #d9dee6;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.viewTab.is-active {
+  background: #2364aa;
+  color: #fff;
+  border-color: #2364aa;
+}
+
+.antPanels,
+.densePanels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 10px;
+  justify-items: center;
+}
+
+.antPanel {
+  width: 100%;
+  max-width: 260px;
+  aspect-ratio: 1 / 1;
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 6px;
+}
+
+.antActual { filter: drop-shadow(0 0 4px currentColor); }
+
+.denseFig { margin: 0; text-align: center; }
+.denseFig figcaption { font-weight: 600; margin-bottom: 4px; font-size: 13px; }
+
+.denseGrid {
+  width: min(260px, 100%);
+  image-rendering: pixelated;
+  border-radius: 6px;
+  border: 1px solid #eceff3;
+}
+
+/* --- Population tab --- */
+.popDetail {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 16px 18px 20px;
+  min-height: calc(100vh - 200px);
+}
+
+.popDetail.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #5b6675);
+}
+
+.popSub {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--muted, #5b6675);
+}
+
+.probeVerdict {
+  font-size: 14.5px;
+  line-height: 1.5;
+  margin: 10px 0 4px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border-left: 4px solid #888;
+  background: #f6f8fa;
+}
+
+.probeVerdict.vGood { border-left-color: #2f9e57; background: #f1f9f4; }
+.probeVerdict.vBad { border-left-color: #bd3c3c; background: #fbf3f3; }
+
+.probeBlock {
+  margin-top: 16px;
+}
+
+.probeBlock h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.probeBar {
+  width: min(480px, 100%);
+  height: auto;
+  display: block;
+  margin: 2px 0;
+}
+
+.probeLbl { font-size: 12px; fill: var(--ink); }
+.probeVal { font-size: 11px; fill: var(--muted, #5b6675); font-variant-numeric: tabular-nums; }
+.probeNote { font-size: 13px; color: #4a525e; margin: 8px 0 0; }
+
+.layerwise {
+  width: min(600px, 100%);
+  height: auto;
+  background: #fafbfc;
+  border: 1px solid #eceff3;
+  border-radius: 6px;
+}
+
+/* --- Violation map view --- */
+.dirLayout {
+  display: grid;
+  grid-template-columns: minmax(240px, 360px) 1fr;
+  gap: 18px;
+  align-items: start;
+  margin-top: 6px;
+}
+
+.dirPreview {
+  margin-top: 14px;
+}
+
+.dirPinStatus {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 8px;
+  min-height: 18px;
+}
+
+.dirPinStatus strong { color: var(--ink); }
+
+.previewCards {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  /* reserve room for the videos so swapping the preview never reflows the
+     charts above it (which would shove the cursor off the dot being hovered) */
+  min-height: 188px;
+  align-content: flex-start;
+}
+
+.previewCard {
+  margin: 0;
+  width: min(280px, 44vw);
+}
+
+.previewCard figcaption {
+  font-size: 12.5px;
+  color: var(--ink);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.previewCard video {
+  width: 100%;
+  aspect-ratio: 16 / 9;       /* fixed box so the video doesn't resize on load */
+  object-fit: cover;
+  border-radius: 6px;
+  background: #000;
+}
+
+.previewCard.pinned figcaption::before { content: "📌 "; }
+
+.dirLoadings {
+  margin-top: 16px;
+}
+
+.linkBtn {
+  background: none;
+  border: none;
+  color: #2364aa;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.95em;
+  padding: 0;
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .dirLayout {
+    grid-template-columns: 1fr;
+  }
 }

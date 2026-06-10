@@ -70,6 +70,14 @@ runs/intphys_rescore/
 A small `viewer/manifest.py` helper (`Manifest` with `add_example(...)` /
 `write()`) keeps emitting this to a few lines at the end of any adapter.
 
+**Latent-surface variant.** The `latent_surface` adapter reuses the player but
+swaps the surprise curve for a latent *surface*: examples carry a `latent` block
+(shared-PCA trajectory + effective-rank, latent-velocity-vs-flow, and
+divergence rails) instead of `dense_curve`, and the run carries
+`latent_space.null_divergence` (the within-scene null band). The viewer renders
+the latent player when an example has a `latent` field. Full contract and method:
+`LATENT_SURFACE.md`.
+
 ---
 
 ## 2. The three tabs

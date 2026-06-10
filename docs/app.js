@@ -5,7 +5,8 @@ const state = {
   inventory: null,
   examples: [],
   selectedExampleId: null,
-  popSort: "absgap",
+  exploreView: "latent",
+  popView: "probes",
 };
 
 const els = {
@@ -15,13 +16,8 @@ const els = {
   metricSort: document.querySelector("#metricSort"),
   exampleList: document.querySelector("#exampleList"),
   exampleDetail: document.querySelector("#exampleDetail"),
+  populationDetail: document.querySelector("#populationDetail"),
   homeStats: document.querySelector("#homeStats"),
-  populationBody: document.querySelector("#populationBody"),
-  populationEmpty: document.querySelector("#populationEmpty"),
-  inventoryFilter: document.querySelector("#inventoryFilter"),
-  inventoryView: document.querySelector("#inventoryView"),
-  inventoryBody: document.querySelector("#inventoryBody"),
-  inventoryEmpty: document.querySelector("#inventoryEmpty"),
 };
 
 // When built for static hosting (GitHub Pages), the built index.html sets
@@ -307,7 +303,6 @@ function initCurationPanel(root, example) {
         object_type: panel.querySelector(".curationObject").value,
       });
       stateEl.textContent = `saved: ${statusLabel(item.visual_status)}`;
-      renderInventory();
     } catch (error) {
       stateEl.textContent = "save failed";
       console.error(error);
@@ -462,11 +457,774 @@ function initRescorePlayer(root, example) {
   iTag.textContent = "frame 0";
 }
 
+// --- Examples tab (latent_surface runs): the same lockstep player, but the curve
+// is replaced by a latent SURFACE — a shared-PCA trajectory plus rails for
+// effective rank, latent-velocity-vs-pixel-flow, and possible/impossible
+// divergence drawn against its own shuffled-pair null band. ---
+
+let latentRAF = null;
+
+// hold-flat-to-edges polyline points, matching interpAt's clamping so the
+// playhead dot rides the line across the whole clip (same trick as the surprise
+// chart). `sx`/`sy` are screen scales; `centers` are window-center frames.
+function holdPoly(centers, vals, nF, sx, sy) {
+  return [
+    `${sx(0)},${sy(vals[0])}`,
+    ...centers.map((f, i) => `${sx(f)},${sy(vals[i])}`),
+    `${sx(nF - 1)},${sy(vals[vals.length - 1])}`,
+  ].join(" ");
+}
+
+// One stacked rail: a small line chart sharing the clip-time x-axis and playhead.
+// `series` = [{vals, color, dash}]; optional `band` = {index, lo, hi} shaded behind.
+// `normalize` rescales each series to its own [0,1] so signals in *different units*
+// (latent velocity vs pixel flow) are shape-comparable instead of one squashing
+// the other; raw same-unit rails (rank, divergence) leave it off.
+function railSVG(cls, title, centers, nF, series, band, normalize) {
+  const W = 600, H = 110, padX = 40, padT = 12, padB = 20;
+  if (normalize) {
+    series = series.map((s) => {
+      const mx = Math.max(1e-9, ...s.vals);
+      return {...s, vals: s.vals.map((v) => v / mx)};
+    });
+  }
+  const all = series.flatMap((s) => s.vals);
+  if (band) all.push(...band.lo, ...band.hi);
+  let minY = Math.min(...all), maxY = Math.max(...all);
+  const padY = (maxY - minY) * 0.12 || 0.01;
+  minY -= padY; maxY += padY;
+  const sx = (f) => padX + (f / Math.max(1, nF - 1)) * (W - padX * 2);
+  const sy = (v) => H - padB - ((v - minY) / Math.max(1e-9, maxY - minY)) * (H - padT - padB);
+  let bandPoly = "";
+  if (band && band.index.length) {
+    const cx = (k) => sx(centers[Math.min(centers.length - 1, k)]);
+    const top = band.index.map((k, i) => `${cx(k)},${sy(band.hi[i])}`);
+    const bot = band.index.map((k, i) => `${cx(k)},${sy(band.lo[i])}`).reverse();
+    bandPoly = `<polygon class="nullBand" points="${[...top, ...bot].join(" ")}" />`;
+  }
+  const lines = series
+    .map((s) => `<polyline class="railLine" fill="none" stroke="${s.color}" stroke-width="2"`
+      + `${s.dash ? ` stroke-dasharray="${s.dash}"` : ""} points="${holdPoly(centers, s.vals, nF, sx, sy)}" />`)
+    .join("");
+  return `<figure class="chartCard">
+    <figcaption>${title}</figcaption>
+    <svg class="railChart ${cls}" viewBox="0 0 ${W} ${H}" data-miny="${minY}" data-maxy="${maxY}">
+      ${bandPoly}${lines}
+      <line class="railPlay" x1="${sx(0)}" y1="${padT - 6}" x2="${sx(0)}" y2="${H - padB}" />
+    </svg></figure>`;
+}
+
+// --- delta-direction views (#1 cosine matrix, #2 delta-PCA, #3 pairwise, #5 loadings) ---
+
+const BLOCK_COLORS = {O1: "#2364aa", O2: "#bd3c3c", O3: "#7a3ea8"};
+const blockColor = (id) => BLOCK_COLORS[String(id).split(":")[0]] || "#888";
+
+// Diverging blue(−1) → white(0) → red(+1) for cosine values.
+function divColor(v) {
+  const t = Math.min(1, Math.abs(Math.max(-1, Math.min(1, v))));
+  const c = v < 0 ? [35, 100, 170] : [189, 60, 60];
+  const m = (x) => Math.round(255 + (x - 255) * t);
+  return `rgb(${m(c[0])},${m(c[1])},${m(c[2])})`;
+}
+
+// #2 — each per-pair Δ direction as a point in the PCA-of-deltas; colored by block,
+// selected pair ringed. Clicking a dot opens that pair.
+function deltaScatterSVG(da, selId) {
+  const VB = 300, pad = 22, padTop = 38;
+  const xy = da.delta_pca.xy;
+  const xs = xy.map((p) => p[0]), ys = xy.map((p) => p[1]);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const px = (x) => pad + ((x - xmin) / ((xmax - xmin) || 1)) * (VB - 2 * pad);
+  const py = (y) => VB - pad - ((y - ymin) / ((ymax - ymin) || 1)) * (VB - pad - padTop);
+  const dots = da.specs.map((s, i) => {
+    const sel = s === selId;
+    return `<circle class="dScatterDot" data-spec="${s}" cx="${px(xy[i][0])}" cy="${py(xy[i][1])}" r="${sel ? 6 : 4}" fill="${blockColor(s)}" stroke="${sel ? "#111" : "#fff"}" stroke-width="${sel ? 2 : 1}"><title>${s}</title></circle>`;
+  }).join("");
+  return `<figure class="chartCard">
+    <figcaption>Each dot is one clip's impossible-event “nudge” — close dots were nudged the same way (color = scene type)</figcaption>
+    <svg class="deltaScatter" viewBox="0 0 ${VB} ${VB}">${dots}</svg></figure>`;
+}
+
+// #1/#3 — full-dim cosine between every pair's Δ direction, as a heatmap. The
+// selected pair's row/col is outlined; an overlay drives the hover readout (#3).
+function cosMatrixSVG(da, selId) {
+  const N = da.specs.length;
+  const G = Math.min(360, Math.max(120, N * 7));
+  const cell = G / N;
+  let rects = "";
+  for (let i = 0; i < N; i += 1) {
+    for (let j = 0; j < N; j += 1) {
+      rects += `<rect x="${j * cell}" y="${i * cell}" width="${cell + 0.6}" height="${cell + 0.6}" fill="${divColor(da.cosine_matrix[i][j])}" />`;
+    }
+  }
+  const si = da.specs.indexOf(selId);
+  const hl = si >= 0
+    ? `<rect x="0" y="${si * cell}" width="${G}" height="${cell}" fill="none" stroke="#111" stroke-width="1.3"/>
+       <rect x="${si * cell}" y="0" width="${cell}" height="${G}" fill="none" stroke="#111" stroke-width="1.3"/>`
+    : "";
+  return `<svg class="cosMatrix" viewBox="0 0 ${G} ${G}" data-n="${N}" data-grid="${G}">
+    ${rects}${hl}
+    <rect class="cosOverlay" x="0" y="0" width="${G}" height="${G}" fill="transparent" style="cursor:crosshair"/></svg>`;
+}
+
+// #3 — the −1..+1 cosine bar with the random-direction null band shaded around 0;
+// a marker is moved as you hover the matrix.
+function cosBarSVG(null95) {
+  const W = 300, H = 34, pad = 10, midY = 20;
+  const sx = (v) => pad + ((v + 1) / 2) * (W - 2 * pad);
+  const band = `<rect x="${sx(-null95)}" y="${midY - 9}" width="${sx(null95) - sx(-null95)}" height="18" fill="#8893a3" opacity="0.25"/>`;
+  return `<svg class="cosBar" viewBox="0 0 ${W} ${H}" data-w="${W}" data-pad="${pad}">
+    <line x1="${pad}" y1="${midY}" x2="${W - pad}" y2="${midY}" stroke="#d9dee6"/>
+    ${band}
+    <text x="${pad}" y="${H - 2}" class="axisLabel" style="fill:#2364aa">−1 opposed</text>
+    <text x="${W - pad}" y="${H - 2}" text-anchor="end" class="axisLabel" style="fill:#bd3c3c">aligned +1</text>
+    <line class="cosMark" x1="${sx(0)}" y1="${midY - 11}" x2="${sx(0)}" y2="${midY + 11}" stroke="#111" stroke-width="2"/></svg>`;
+}
+
+// #5 — the pair's loading on each shared Δ-axis, as signed bars.
+function loadingsSVG(L) {
+  const ld = L.delta_loadings;
+  if (!ld || !ld.length) return "";
+  const W = 560, row = 22, H = row * ld.length + 8, padL = 56, padR = 12;
+  const cx = (padL + (W - padR)) / 2, half = (W - padR - padL) / 2;
+  const max = Math.max(0.3, ...ld.map(Math.abs));
+  const bars = ld.map((v, k) => {
+    const y = 4 + k * row, w = (Math.abs(v) / max) * half, x = v < 0 ? cx - w : cx;
+    return `<text x="6" y="${y + 13}" class="svgAxis">axis ${k + 1}</text>
+      <line x1="${cx}" y1="${y}" x2="${cx}" y2="${y + row - 6}" stroke="#ccc"/>
+      <rect x="${x}" y="${y}" width="${w}" height="${row - 8}" fill="${v < 0 ? "#2364aa" : "#bd3c3c"}" opacity="0.82"><title>${v}</title></rect>`;
+  }).join("");
+  return `<figure class="chartCard">
+    <figcaption>How this clip's nudge lines up with the main shared directions (axis 1 = biggest shared pattern)</figcaption>
+    <svg class="loadingsChart" viewBox="0 0 ${W} ${H}">${bars}</svg></figure>`;
+}
+
+function renderLatentPlayer(example) {
+  const L = example.latent;
+  const nullBand = state.manifest?.latent_space?.null_divergence || null;
+  const da = state.manifest?.latent_space?.delta_analysis || null;
+  els.exampleDetail.className = "";
+  const above = example.label === "above null";
+  els.exampleDetail.innerHTML = `
+    <div class="rescoreHead">
+      <h2>${example.id} <span class="badge ${above ? "badgeGood" : "badgeBad"}">${example.label || "latent"}</span>
+        <span class="viewName">· Latent surface</span></h2>
+      <div class="rescoreControls">
+        <button class="rescorePlay">▶ play</button>
+        <input class="rescoreScrub" type="range" min="0" max="${example.n_frames - 1}" value="0" step="1" />
+        <span class="rescoreReadout"></span>
+      </div>
+    </div>
+    ${viewSwitcher("latent", example)}
+    <p class="latentHint"><strong>In plain terms:</strong> the model turns each moment of video into
+      a long list of numbers — its internal “read” of the scene. The map below squashes that to 2D so
+      you can watch the <span style="color:#2364aa">normal</span> and
+      <span style="color:#bd3c3c">impossible</span> clips as two moving dots. <strong>If the model
+      notices the impossible event, the red dot should veer away from the blue one.</strong> The charts
+      underneath track, moment by moment, different aspects of that read (each chart says what).</p>
+    ${L.divergence_map ? `<div class="ovlToggles"><label><input type="checkbox" class="tgDiv">
+      show where they differ on the frame — <span class="ovlHint">highlights the patches where the
+      model's read of the normal vs impossible clip differs most, following the playhead</span></label></div>` : ""}
+    <div class="latentTop">
+      <div class="rescoreVideos latentVideos">
+        ${videoFigure("Possible", "vPossible", "pTag", assetUrl(example.video_possible))}
+        ${videoFigure("Impossible", "vImpossible", "iTag", assetUrl(example.video_impossible))}
+      </div>
+      <figure class="chartCard pcaCard">
+        <figcaption>The model's “read”, squashed to 2D — each dot is one moment. If it notices the impossible event, red veers off from blue.</figcaption>
+        <svg class="pcaPanel" viewBox="0 0 260 260"></svg>
+      </figure>
+    </div>
+    <div class="rails">
+      ${railSVG("railRank", "How many distinct features it's using (a dip = it simplified its read)", L.center, example.n_frames,
+        [{vals: L.eff_rank.possible, color: "#2364aa"}, {vals: L.eff_rank.impossible, color: "#bd3c3c"}])}
+      ${railSVG("railVel", "Speed the model's read is changing (solid) vs motion in the video (dashed) — solid jumping without dashed = it reshuffled even though little moved", L.center, example.n_frames,
+        [{vals: L.latent_vel.possible, color: "#2364aa"}, {vals: L.latent_vel.impossible, color: "#bd3c3c"},
+         {vals: L.flow.possible, color: "#2364aa", dash: "4 3"}, {vals: L.flow.impossible, color: "#bd3c3c", dash: "4 3"}], null, true)}
+      ${railSVG("railDiv", "Gap between the normal & impossible clip (purple) vs the same-scene 'nothing unusual' baseline (grey) — purple above grey = treated as genuinely different", L.center, example.n_frames,
+        [{vals: L.divergence, color: "#7a3ea8"}], nullBand)}
+      ${L.shadow_frac ? railSVG("railShadow", "How much of that gap this 2D map can actually show (low = trust the map less; the rest is off-screen)", L.center, example.n_frames,
+        [{vals: L.shadow_frac, color: "#3a8f5a"}]) : ""}
+    </div>
+    ${da ? `<p class="latentHint">Want to compare this clip's “nudge” to every other clip's? See the
+      <button class="linkBtn" data-goto-map>Violation map</button> on the Population tab.</p>` : ""}
+    ${metricGrid(example.metrics)}
+    ${curationPanel(example)}`;
+  initLatentPlayer(els.exampleDetail, example);
+  initCurationPanel(els.exampleDetail, example);
+  initViewSwitcher(els.exampleDetail);
+  els.exampleDetail.querySelectorAll("[data-goto-map]").forEach((b) =>
+    b.addEventListener("click", () => { state.popView = "map"; activateTab("population"); }));
+}
+
+function initLatentPlayer(root, example) {
+  if (latentRAF) cancelAnimationFrame(latentRAF);
+  const L = example.latent;
+  const nF = example.n_frames;
+  const fps = example.fps || 12;
+  const pos = root.querySelector(".vPossible");
+  const imp = root.querySelector(".vImpossible");
+  const playBtn = root.querySelector(".rescorePlay");
+  const scrub = root.querySelector(".rescoreScrub");
+  const readout = root.querySelector(".rescoreReadout");
+  const pTag = root.querySelector(".pTag");
+  const iTag = root.querySelector(".iTag");
+  const frameOf = (v) => Math.min(nF - 1, Math.max(0, Math.round(v.currentTime * fps)));
+
+  // --- PCA panel: both trajectories in one space, with a moving dot per clip ---
+  const panel = root.querySelector(".pcaPanel");
+  const VB = 260, pad = 24;
+  const xs = [...L.pca.possible, ...L.pca.impossible].map((p) => p[0]);
+  const ysv = [...L.pca.possible, ...L.pca.impossible].map((p) => p[1]);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const ymin = Math.min(...ysv), ymax = Math.max(...ysv);
+  const px = (x) => pad + ((x - xmin) / Math.max(1e-9, xmax - xmin)) * (VB - pad * 2);
+  const py = (y) => VB - pad - ((y - ymin) / Math.max(1e-9, ymax - ymin)) * (VB - pad * 2);
+  const path = (pts) => pts.map((p) => `${px(p[0])},${py(p[1])}`).join(" ");
+  const dots = (pts, color) => pts.map((p) => `<circle cx="${px(p[0])}" cy="${py(p[1])}" r="1.6" fill="${color}" opacity="0.35" />`).join("");
+  panel.innerHTML = `
+    <polyline fill="none" stroke="#2364aa" stroke-width="1.5" opacity="0.5" points="${path(L.pca.possible)}" />
+    <polyline fill="none" stroke="#bd3c3c" stroke-width="1.5" opacity="0.5" points="${path(L.pca.impossible)}" />
+    ${dots(L.pca.possible, "#2364aa")}${dots(L.pca.impossible, "#bd3c3c")}
+    <circle class="pcaDotP" r="5" fill="#2364aa" stroke="#fff" stroke-width="1.5" />
+    <circle class="pcaDotI" r="5" fill="#bd3c3c" stroke="#fff" stroke-width="1.5" />`;
+  const pcaDotP = panel.querySelector(".pcaDotP");
+  const pcaDotI = panel.querySelector(".pcaDotI");
+
+  const playLines = [...root.querySelectorAll(".railPlay")];
+  const rails = [...root.querySelectorAll(".railChart")];
+  const railX = (svg, f) => {
+    const W = 600, padX = 40;
+    return padX + (f / Math.max(1, nF - 1)) * (W - padX * 2);
+  };
+  const nearestWindow = (f) => {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < L.center.length; i += 1) {
+      const d = Math.abs(L.center[i] - f);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  };
+
+  // Localized divergence heatmap: the per-patch ‖pos − imp‖ for the nearest window,
+  // painted on both clips (it's where they differ), reusing the surprise overlay.
+  const dm = L.divergence_map || null;
+  const pOvl = root.querySelector(".vPossibleOvl");
+  const iOvl = root.querySelector(".vImpossibleOvl");
+  const tgDiv = root.querySelector(".tgDiv");
+  const drawDiv = (frame) => {
+    if (!dm) return;
+    const show = !!(tgDiv && tgDiv.checked);
+    const grid = show ? dm.grid[nearestWindow(frame)] : null;
+    drawOverlay(pOvl, pos, dm, grid, null, false, show);
+    drawOverlay(iOvl, imp, dm, grid, null, false, show);
+  };
+  if (tgDiv) {
+    tgDiv.addEventListener("change", () => drawDiv(Number(scrub.value)));
+    pos.addEventListener("loadeddata", () => drawDiv(Number(scrub.value)));
+    imp.addEventListener("loadeddata", () => drawDiv(Number(scrub.value)));
+  }
+
+  function place(frame) {
+    const j = nearestWindow(frame);
+    const pp = L.pca.possible[j], ip = L.pca.impossible[j];
+    pcaDotP.setAttribute("cx", px(pp[0])); pcaDotP.setAttribute("cy", py(pp[1]));
+    pcaDotI.setAttribute("cx", px(ip[0])); pcaDotI.setAttribute("cy", py(ip[1]));
+    playLines.forEach((ln, i) => {
+      const x = railX(rails[i], frame);
+      ln.setAttribute("x1", x); ln.setAttribute("x2", x);
+    });
+    drawDiv(frame);
+    const div = interpAt(L.center, L.divergence, frame);
+    readout.textContent = `frame ${Math.round(frame)}/${nF - 1} · normal↔impossible gap ${div.toFixed(3)} · features-used ${L.eff_rank.impossible[j].toFixed(1)}`;
+  }
+
+  function loop() {
+    if (!root.isConnected) return;
+    const frame = pos.currentTime * fps;
+    if (Math.abs(imp.currentTime - pos.currentTime) > 0.08) imp.currentTime = pos.currentTime;
+    scrub.value = String(Math.min(nF - 1, Math.round(frame)));
+    place(frame);
+    pTag.textContent = `frame ${frameOf(pos)}`;
+    iTag.textContent = `frame ${frameOf(imp)}`;
+    latentRAF = requestAnimationFrame(loop);
+  }
+  function play() {
+    pos.play(); imp.play();
+    playBtn.textContent = "⏸ pause";
+    latentRAF = requestAnimationFrame(loop);
+  }
+  function stop() {
+    pos.pause(); imp.pause();
+    if (latentRAF) cancelAnimationFrame(latentRAF);
+    latentRAF = null;
+    playBtn.textContent = "▶ play";
+  }
+  playBtn.addEventListener("click", () => (latentRAF ? stop() : play()));
+  scrub.addEventListener("input", () => {
+    const f = Number(scrub.value);
+    const t = f / fps;
+    pos.currentTime = t; imp.currentTime = t;
+    place(f);
+    pTag.textContent = `frame ${f}`;
+    iTag.textContent = `frame ${f}`;
+  });
+  pos.addEventListener("ended", () => {
+    stop(); pos.currentTime = 0; imp.currentTime = 0; place(0); scrub.value = "0";
+    pTag.textContent = "frame 0"; iTag.textContent = "frame 0";
+  });
+  place(0);
+  pTag.textContent = "frame 0";
+  iTag.textContent = "frame 0";
+}
+
+// Shared lockstep player wiring: drives two <video>s + a scrub + a playhead,
+// calling place(frame) each tick. Used by the anticipation view (the latent view
+// has its own copy with extra overlay handling).
+function syncLockstep({pos, imp, scrub, playBtn, fps, nF, place, root, tag}) {
+  const frameOf = (v) => Math.min(nF - 1, Math.max(0, Math.round(v.currentTime * fps)));
+  function loop() {
+    if (!root.isConnected) return;
+    const frame = pos.currentTime * fps;
+    if (Math.abs(imp.currentTime - pos.currentTime) > 0.08) imp.currentTime = pos.currentTime;
+    scrub.value = String(Math.min(nF - 1, Math.round(frame)));
+    place(frame);
+    if (tag) { tag.p.textContent = `frame ${frameOf(pos)}`; tag.i.textContent = `frame ${frameOf(imp)}`; }
+    latentRAF = requestAnimationFrame(loop);
+  }
+  function play() { pos.play(); imp.play(); playBtn.textContent = "⏸ pause"; latentRAF = requestAnimationFrame(loop); }
+  function stop() { pos.pause(); imp.pause(); if (latentRAF) cancelAnimationFrame(latentRAF); latentRAF = null; playBtn.textContent = "▶ play"; }
+  playBtn.addEventListener("click", () => (latentRAF ? stop() : play()));
+  scrub.addEventListener("input", () => {
+    const f = Number(scrub.value), t = f / fps;
+    pos.currentTime = t; imp.currentTime = t; place(f);
+    if (tag) { tag.p.textContent = `frame ${f}`; tag.i.textContent = `frame ${f}`; }
+  });
+  pos.addEventListener("ended", () => { stop(); pos.currentTime = 0; imp.currentTime = 0; place(0); scrub.value = "0"; });
+  place(0);
+  if (tag) { tag.p.textContent = "frame 0"; tag.i.textContent = "frame 0"; }
+}
+
+// --- multi-view explorer: a switcher over the lenses a latent run carries ---
+
+// Per-clip lenses only — these change as you pick a different pair. The two
+// population read-outs (Probes, Violation map) are identical for every clip, so
+// they live on the dedicated Population tab, not in this per-clip switcher.
+const VIEW_LABELS = {latent: "Latent surface", anticipation: "Anticipation", dense: "Dense features"};
+
+function availableViews(example) {
+  const views = ["latent"];
+  if (example.latent?.anticipation) views.push("anticipation");
+  if (example.latent?.dense_pca) views.push("dense");
+  return views;
+}
+
+function setExploreView(v) {
+  state.exploreView = v;
+  renderExampleDetail();
+}
+
+function viewSwitcher(active, example) {
+  const views = availableViews(example);
+  if (views.length < 2) return "";
+  return `<div class="viewSwitch">${views.map((v) =>
+    `<button class="viewTab${v === active ? " is-active" : ""}" data-view="${v}">${VIEW_LABELS[v]}</button>`).join("")}</div>`;
+}
+
+function initViewSwitcher(root) {
+  root.querySelectorAll(".viewTab").forEach((b) =>
+    b.addEventListener("click", () => setExploreView(b.dataset.view)));
+}
+
+function exploreHead(example, viewName) {
+  const above = example.label === "above null";
+  return `<div class="rescoreHead">
+      <h2>${example.id} <span class="badge ${above ? "badgeGood" : "badgeBad"}">${example.label || "latent"}</span>
+        <span class="viewName">· ${viewName}</span></h2>
+    </div>
+    ${viewSwitcher(state.exploreView, example)}`;
+}
+
+// --- Anticipation view: the predictor's output vs the actual future, per clip.
+// Surprise is just the magnitude of this gap; here we show its trajectory. ---
+function predActualSVG(side, ant, color) {
+  const VB = 260, pad = 24;
+  const all = [...ant.pred_xy, ...ant.actual_xy];
+  const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const px = (x) => pad + ((x - xmin) / ((xmax - xmin) || 1)) * (VB - 2 * pad);
+  const py = (y) => VB - pad - ((y - ymin) / ((ymax - ymin) || 1)) * (VB - 2 * pad);
+  const path = (pts, dash) => `<polyline fill="none" stroke="${color}" stroke-width="1.6" opacity="0.6"${dash ? ` stroke-dasharray="4 3"` : ""} points="${pts.map((p) => `${px(p[0])},${py(p[1])}`).join(" ")}" />`;
+  const off = ant.offset != null ? ` · constant predictor↔target offset of ${ant.offset.toFixed(1)} removed` : "";
+  const cm = ant.comove != null
+    ? ` · <strong>move-together r = ${ant.comove.toFixed(2)}</strong> (1 = the prediction anticipates every turn; 0 = unrelated)`
+    : "";
+  return `<figure class="chartCard">
+    <figcaption><strong style="color:${color}">${side}</strong> — predicted (dashed) vs actual (solid), aligned to a shared center so the paths start together${off}; where they pull apart, the model genuinely mispredicted that moment${cm}</figcaption>
+    <svg class="antPanel" viewBox="0 0 ${VB} ${VB}">
+      ${path(ant.actual_xy, false)}${path(ant.pred_xy, true)}
+      <circle class="antActual" r="5" fill="${color}" stroke="#fff" stroke-width="1.5"/>
+      <circle class="antPred" r="5" fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="2 2"/></svg></figure>`;
+}
+
+function renderAnticipationView(example) {
+  const A = example.latent.anticipation;
+  els.exampleDetail.className = "";
+  els.exampleDetail.innerHTML = `
+    ${exploreHead(example, "Anticipation")}
+    <p class="latentHint"><strong>In plain terms:</strong> part of V-JEPA tries to <em>predict what
+      happens next</em>. The <strong>solid</strong> line is what actually happened (in the model's own
+      terms); the <strong>dashed</strong> line is what it predicted. The predictor and the target are
+      two different networks, so their outputs sit a near-constant distance apart every frame — an offset
+      that says nothing about <em>when</em> the model is surprised. We subtract that constant so the two
+      paths start together; what's left is the real story: where they pull apart, the prediction genuinely
+      drifted off the future. (The raw gap, offset included, is the “surprise” rails below.)</p>
+    <div class="rescoreControls">
+      <button class="rescorePlay">▶ play</button>
+      <input class="rescoreScrub" type="range" min="0" max="${example.n_frames - 1}" value="0" step="1" />
+      <span class="rescoreReadout"></span>
+    </div>
+    <div class="rescoreVideos latentVideos">
+      ${videoFigure("Possible", "vPossible", "pTag", assetUrl(example.video_possible))}
+      ${videoFigure("Impossible", "vImpossible", "iTag", assetUrl(example.video_impossible))}
+    </div>
+    <div class="antPanels">
+      ${predActualSVG("Possible", A.possible, "#2364aa")}
+      ${predActualSVG("Impossible", A.impossible, "#bd3c3c")}
+    </div>
+    <div class="rails">
+      ${railSVG("antErrP", "How wrong its prediction was, moment by moment — normal clip", example.latent.center, example.n_frames, [{vals: A.possible.err, color: "#2364aa"}])}
+      ${railSVG("antErrI", "How wrong its prediction was, moment by moment — impossible clip", example.latent.center, example.n_frames, [{vals: A.impossible.err, color: "#bd3c3c"}])}
+    </div>`;
+  initAnticipationView(els.exampleDetail, example);
+  initViewSwitcher(els.exampleDetail);
+}
+
+function initAnticipationView(root, example) {
+  if (latentRAF) cancelAnimationFrame(latentRAF);
+  const A = example.latent.anticipation, C = example.latent.center;
+  const nF = example.n_frames, fps = example.fps || 12;
+  const pos = root.querySelector(".vPossible"), imp = root.querySelector(".vImpossible");
+  const scrub = root.querySelector(".rescoreScrub"), playBtn = root.querySelector(".rescorePlay");
+  const readout = root.querySelector(".rescoreReadout");
+  const panels = [...root.querySelectorAll(".antPanel")];
+  const playLines = [...root.querySelectorAll(".railPlay")];
+  const rails = [...root.querySelectorAll(".railChart")];
+  const sides = [{p: panels[0], a: A.possible}, {p: panels[1], a: A.impossible}];
+  const nearest = (f) => { let b = 0, bd = Infinity; C.forEach((c, i) => { const d = Math.abs(c - f); if (d < bd) { bd = d; b = i; } }); return b; };
+  const railX = (f) => 40 + (f / Math.max(1, nF - 1)) * (600 - 80);
+  // recompute panel coords (same scaling as predActualSVG) to place the dots
+  const placePanel = ({p, a}, j) => {
+    const VB = 260, pad = 24, all = [...a.pred_xy, ...a.actual_xy];
+    const xs = all.map((q) => q[0]), ys = all.map((q) => q[1]);
+    const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
+    const px = (x) => pad + ((x - xmin) / ((xmax - xmin) || 1)) * (VB - 2 * pad);
+    const py = (y) => VB - pad - ((y - ymin) / ((ymax - ymin) || 1)) * (VB - 2 * pad);
+    const act = p.querySelector(".antActual"), prd = p.querySelector(".antPred");
+    act.setAttribute("cx", px(a.actual_xy[j][0])); act.setAttribute("cy", py(a.actual_xy[j][1]));
+    prd.setAttribute("cx", px(a.pred_xy[j][0])); prd.setAttribute("cy", py(a.pred_xy[j][1]));
+  };
+  const place = (frame) => {
+    const j = nearest(frame);
+    sides.forEach((s) => placePanel(s, j));
+    playLines.forEach((ln) => { const x = railX(frame); ln.setAttribute("x1", x); ln.setAttribute("x2", x); });
+    readout.textContent = `frame ${Math.round(frame)}/${nF - 1} · how wrong the prediction was — normal ${A.possible.err[j].toFixed(2)} · impossible ${A.impossible.err[j].toFixed(2)}`;
+  };
+  syncLockstep({pos, imp, scrub, playBtn, fps, nF, place, root,
+    tag: {p: root.querySelector(".pTag"), i: root.querySelector(".iTag")}});
+}
+
+// --- Dense view: per-clip top-3 PCA of the patch grid as an RGB segmentation. ---
+function densePcaSVG(grid, label) {
+  const H = grid.length, W = grid[0].length, cell = 18;
+  let rects = "";
+  for (let r = 0; r < H; r += 1) for (let c = 0; c < W; c += 1) {
+    const [R, G, B] = grid[r][c].map((v) => Math.round(v * 255));
+    rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell}" height="${cell}" fill="rgb(${R},${G},${B})"/>`;
+  }
+  return `<figure class="denseFig"><figcaption>${label}</figcaption>
+    <svg class="denseGrid" viewBox="0 0 ${W * cell} ${H * cell}">${rects}</svg></figure>`;
+}
+
+function renderDenseView(example) {
+  const D = example.latent.dense_pca;
+  els.exampleDetail.className = "";
+  els.exampleDetail.innerHTML = `
+    ${exploreHead(example, "Dense features")}
+    <p class="latentHint"><strong>In plain terms:</strong> we color each square of the frame by what
+      the model “sees” there — squares it represents similarly get similar colors. It's a rough map of
+      how the model carves up the scene (does it pick out the object, the wall, the floor?). Colors are
+      arbitrary and only meaningful <em>within</em> one clip, not between the two.
+      <strong>This is one static map per clip — averaged over the whole clip, not a single frame</strong>
+      — so there's nothing to scrub or play; it answers “how does the model partition this scene on
+      average,” not “how does it change frame to frame.”</p>
+    <div class="rescoreVideos latentVideos">
+      ${videoFigure("Possible", "vPossible", "pTag", assetUrl(example.video_possible))}
+      ${videoFigure("Impossible", "vImpossible", "iTag", assetUrl(example.video_impossible))}
+    </div>
+    <div class="densePanels">
+      ${densePcaSVG(D.possible, "Possible clip")}
+      ${densePcaSVG(D.impossible, "Impossible clip")}
+    </div>`;
+  initViewSwitcher(els.exampleDetail);
+}
+
+// --- Probes view (population): is a factor linearly decodable from the frozen
+// latent, vs a label-shuffle null; and at what depth does it emerge? ---
+function probeBar(f) {
+  // label row on top, the 0..1 accuracy track below it (with the shuffle-null tick).
+  const W = 480, H = 42, x0 = 10, x1 = W - 130, trackY = 30;
+  const sx = (v) => x0 + v * (x1 - x0);
+  return `<svg class="probeBar" viewBox="0 0 ${W} ${H}">
+    <text x="${x0}" y="13" class="probeLbl">${f.name}</text>
+    <line x1="${x0}" y1="${trackY}" x2="${x1}" y2="${trackY}" stroke="#e1e5ea"/>
+    <rect x="${x0}" y="${trackY - 4}" width="${sx(f.acc) - x0}" height="8" rx="2" fill="${f.acc - f.null > 0.1 ? "#2f9e57" : "#bd3c3c"}"/>
+    <rect x="${sx(f.null)}" y="${trackY - 7}" width="2" height="14" fill="#444"><title>shuffle null ${f.null}</title></rect>
+    <text x="${x1 + 8}" y="${trackY + 4}" class="probeVal">${(f.acc * 100).toFixed(0)}% · null ${(f.null * 100).toFixed(0)}%</text>
+  </svg>`;
+}
+
+function layerwiseSVG(lw) {
+  const W = 600, H = 200, pad = 40;
+  const n = lw.layers.length;
+  const sx = (i) => pad + (i / Math.max(1, n - 1)) * (W - 2 * pad);
+  const sy = (v) => H - pad - v * (H - 2 * pad);
+  const poly = (vals, color, dash) => `<polyline fill="none" stroke="${color}" stroke-width="2"${dash ? ` stroke-dasharray="4 3"` : ""} points="${vals.map((v, i) => `${sx(i)},${sy(v)}`).join(" ")}"/>`;
+  return `<svg class="layerwise" viewBox="0 0 ${W} ${H}">
+    <line x1="${pad}" y1="${sy(0.5)}" x2="${W - pad}" y2="${sy(0.5)}" stroke="#e1e5ea" stroke-dasharray="3 3"/>
+    <text x="${W - pad}" y="${sy(0.5) - 5}" text-anchor="end" class="svgAxis">guessing (50%)</text>
+    ${poly(lw.acc, "#2364aa", false)}${poly(lw.null, "#888", true)}
+    <text x="${pad}" y="${H - 8}" class="svgAxis">shallow (layer 0)</text>
+    <text x="${W - pad}" y="${H - 8}" text-anchor="end" class="svgAxis">deep (layer ${n - 1}) →</text>
+  </svg>`;
+}
+
+// --- Violation map (population): every clip's impossible-event "nudge" as a map +
+// a similarity grid, with a live clip preview so a cluster leads to the footage. ---
+function renderMapPanel(host) {
+  const da = state.manifest?.latent_space?.delta_analysis;
+  if (!da) {
+    host.innerHTML = popHead("Violation map") + popSwitcher("map") + `<div class="empty">No violation-direction analysis in this run.</div>`;
+    return;
+  }
+  // Focus on the clip you last looked at in Explore, else the first one.
+  const focus = (state.selectedExampleId && da.specs.includes(state.selectedExampleId)) ? state.selectedExampleId : da.specs[0];
+  host.innerHTML = `
+    ${popHead("Violation map")}
+    ${popSwitcher("map")}
+    <p class="latentHint"><strong>In plain terms:</strong> for each clip we take the difference between
+      how the model reads the impossible version vs its possible twin, averaged over the <em>whole</em>
+      clip — one “nudge” direction per clip (not per frame or segment). This compares those nudges across
+      all ${da.specs.length} clips: each dot / each row-and-column is one full clip, and clips nudged the
+      same way land near each other on the map (and show red on the grid).
+      <strong>Hover a dot or square to preview the clip(s); click to pin them so you can compare
+      without the preview chasing your cursor; “open ▶” jumps to that clip's full view in Explore.</strong></p>
+    <div class="dirLayout">
+      ${deltaScatterSVG(da, focus)}
+      <div class="cosWrap">
+        <div class="chartCap">Similarity of two clips' nudges — hover a square to compare, click to pin</div>
+        ${cosMatrixSVG(da, focus)}
+        <div class="cosReadout">Hover a square: red = the two clips' impossible events move the model the same way, blue = opposite, white = unrelated.</div>
+        ${cosBarSVG(da.null_cos95)}
+      </div>
+    </div>
+    <div class="dirPreview"><div class="dirPinStatus"></div><div class="previewCards"></div></div>`;
+  initDirectionsView(host, {id: focus}, da);
+}
+
+function initDirectionsView(root, example, da) {
+  const cards = root.querySelector(".previewCards");
+  const status = root.querySelector(".dirPinStatus");
+  const exBySpec = (s) => state.examples.find((e) => e.id === s);
+  const openPair = (spec) => {
+    if (!spec) return;
+    state.selectedExampleId = spec;
+    state.exploreView = "latent";
+    activateTab("examples");          // the map lives on Population; the clip opens in Explore
+    renderExampleList();
+    renderExampleDetail();
+  };
+
+  // `pinned` non-null means the user clicked to lock a comparison in place.
+  // While pinned, hover is ignored so the preview (and the layout) stop moving —
+  // that's what lets you study two clips without the rerender chasing your cursor.
+  let pinned = null;
+  let lastKey = "";
+  const draw = (specs, isPinned) => {
+    const key = (isPinned ? "P:" : "H:") + specs.join("|");
+    if (key === lastKey) return;   // don't rebuild <video>s on every mousemove
+    lastKey = key;
+    cards.innerHTML = specs.map((s) => {
+      const ex = exBySpec(s);
+      if (!ex) return "";
+      return `<figure class="previewCard${isPinned ? " pinned" : ""}">
+        <figcaption>${s} — impossible clip <button class="linkBtn" data-open="${s}">open ▶</button></figcaption>
+        <video muted loop autoplay playsinline src="${assetUrl(ex.video_impossible)}"></video></figure>`;
+    }).join("");
+    cards.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => openPair(b.dataset.open)));
+  };
+  const setStatus = () => {
+    if (pinned) {
+      status.innerHTML = `📌 Pinned <strong>${pinned.join("</strong> vs <strong>")}</strong> — `
+        + `move freely, then <button class="linkBtn dirClear">clear</button> to follow the cursor again.`;
+      status.querySelector(".dirClear").addEventListener("click", () => {
+        pinned = null; draw([example.id], false); litDot([example.id]); setStatus();
+      });
+    } else {
+      status.textContent = "Hover the map to preview; click a dot or square to pin it here so it stops moving.";
+    }
+  };
+  // light up the matching dot(s) in the scatter so a heatmap pick is visible there too
+  const dots = [...root.querySelectorAll(".dScatterDot")];
+  const litDot = (specs) => {
+    const set = new Set(specs);
+    dots.forEach((d) => {
+      const on = set.has(d.dataset.spec);
+      d.setAttribute("r", on ? 7 : 4);
+      d.setAttribute("stroke", on ? "#111" : "#fff");
+      d.setAttribute("stroke-width", on ? 2.5 : 1);
+      if (on) d.parentNode.appendChild(d);   // raise lit dots to the front
+    });
+  };
+  const hover = (specs) => { if (!pinned) { draw(specs, false); litDot(specs); } };
+  const pin = (specs) => { pinned = specs; lastKey = ""; draw(specs, true); litDot(specs); setStatus(); };
+
+  root.querySelectorAll(".dScatterDot").forEach((dot) => {
+    dot.addEventListener("mouseenter", () => hover([dot.dataset.spec]));
+    dot.addEventListener("click", (e) => { e.stopPropagation(); pin([dot.dataset.spec]); });
+  });
+
+  const matrix = root.querySelector(".cosMatrix");
+  if (matrix) {
+    const overlay = matrix.querySelector(".cosOverlay");
+    const readout = root.querySelector(".cosReadout");
+    const mark = root.querySelector(".cosBar .cosMark");
+    const N = da.specs.length;
+    const cellOf = (e) => {
+      const r = overlay.getBoundingClientRect();
+      const j = Math.max(0, Math.min(N - 1, Math.floor(((e.clientX - r.left) / r.width) * N)));
+      const i = Math.max(0, Math.min(N - 1, Math.floor(((e.clientY - r.top) / r.height) * N)));
+      return [i, j];
+    };
+    const specsFor = (i, j) => (i === j ? [da.specs[i]] : [da.specs[i], da.specs[j]]);
+    overlay.addEventListener("mousemove", (e) => {
+      const [i, j] = cellOf(e);
+      const c = da.cosine_matrix[i][j];
+      const verdict = Math.abs(c) <= da.null_cos95 ? "unrelated (within noise)"
+        : c > 0 ? "same way" : "opposite";
+      readout.textContent = `${da.specs[i]}  vs  ${da.specs[j]} · ${c >= 0 ? "+" : ""}${c.toFixed(2)} · ${verdict}`;
+      if (mark) { const x = 10 + ((c + 1) / 2) * (300 - 20); mark.setAttribute("x1", x); mark.setAttribute("x2", x); }
+      hover(specsFor(i, j));
+    });
+    overlay.addEventListener("click", (e) => { const [i, j] = cellOf(e); pin(specsFor(i, j)); });
+  }
+
+  draw([example.id], false);   // default: the pair you came in on
+  litDot([example.id]);
+  setStatus();
+}
+
+function renderProbesPanel(host) {
+  const p = state.manifest?.latent_space?.probes;
+  if (!p) {
+    host.innerHTML = popHead("Probes") + popSwitcher("probes") + `<div class="empty">No probe analysis in this run.</div>`;
+    return;
+  }
+  const partial = p.validity_motion_partialled;
+  // Lead with the plain verdict computed from the data, not jargon.
+  const find = (sub) => (p.factors || []).find((f) => f.name.toLowerCase().includes(sub));
+  const phys = find("impossible");
+  const scene = find("scene");
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const readable = phys && phys.acc - phys.null > 0.1;
+  const verdict = phys
+    ? `<p class="probeVerdict ${readable ? "vGood" : "vBad"}">
+        The model's frozen features <strong>${readable ? "can" : "cannot"}</strong> tell impossible from
+        normal: <strong>${pct(phys.acc)}</strong> vs ${pct(phys.null)} for pure guessing${readable ? "" : " — i.e. at chance"}.
+        ${scene ? `Yet the same features read off <em>which scene type</em> it is at <strong>${pct(scene.acc)}</strong>,
+        and predict <em>how much is moving</em> almost perfectly` : ""}${typeof p.motion_r2 === "number" ? ` (r² = ${p.motion_r2.toFixed(2)})` : ""}.
+        ${readable ? "" : "So the representation richly encodes scene and motion, but the <strong>“did physics break?” signal isn't linearly present at all</strong> — the identifiability version of the headline surprise result."}
+      </p>`
+    : "";
+  host.innerHTML = `
+    ${popHead("Probes")}
+    ${popSwitcher("probes")}
+    ${verdict}
+    <p class="latentHint"><strong>How to read this:</strong> we freeze the model's features and hand a
+      <em>simple</em> classifier one fact to read off (“is this impossible?”, “which scene type?”,
+      “how much motion?”), scored against a <strong>shuffled-label baseline</strong> (pure guessing).
+      <strong>A bar past the dark tick = a fact the model genuinely represents; a bar sitting at the tick
+      = it can't tell.</strong> This summarizes the whole set, so it's the same for every clip.</p>
+    <div class="probeBlock">
+      <h3>Can the model's features tell these apart?</h3>
+      ${(p.factors || []).map(probeBar).join("") || `<div class="empty">No probe factors for this run.</div>`}
+      ${partial ? `<p class="probeNote"><strong>The key control:</strong> can it still tell normal from impossible <em>after we erase the “how much is moving” signal</em> from the features? <strong>${pct(partial.acc)}</strong> (guessing ≈ ${pct(partial.null)}). At the guessing level means the little it had was just motion, not physics.</p>` : ""}
+    </div>
+    ${p.layerwise ? `<div class="probeBlock"><h3>Where in the network does this show up?</h3>
+      <p class="probeNote">Reading “impossible vs normal” at each layer, shallow (left) to deep (right). Blue rising above the grey baseline = where the model first represents it.</p>
+      ${layerwiseSVG(p.layerwise)}</div>` : ""}`;
+}
+
+// --- Population tab: the read-outs that are the same for every clip ----------
+const POP_LABELS = {probes: "Probes", map: "Violation map"};
+
+function availablePopViews() {
+  const ls = state.manifest?.latent_space;
+  const v = [];
+  if (ls?.probes) v.push("probes");
+  if (ls?.delta_analysis) v.push("map");
+  return v;
+}
+
+function popHead(viewName) {
+  return `<div class="rescoreHead"><h2>Population <span class="viewName">· ${viewName}</span>
+    <span class="popSub">— summarizes all ${state.examples.length} clips; the same for every pair</span></h2></div>`;
+}
+
+function popSwitcher(active) {
+  const views = availablePopViews();
+  if (views.length < 2) return "";
+  return `<div class="viewSwitch">${views.map((v) =>
+    `<button class="viewTab${v === active ? " is-active" : ""}" data-popview="${v}">${POP_LABELS[v]}</button>`).join("")}</div>`;
+}
+
+function setPopView(v) {
+  state.popView = v;
+  renderPopulation();
+}
+
+function renderPopulation() {
+  const host = els.populationDetail;
+  if (!host) return;
+  const views = availablePopViews();
+  if (!views.length) {
+    host.className = "popDetail empty";
+    host.textContent = "This run has no population-level analysis (probes / violation map).";
+    return;
+  }
+  if (!views.includes(state.popView)) state.popView = views[0];
+  host.className = "popDetail";
+  if (state.popView === "map") renderMapPanel(host);
+  else renderProbesPanel(host);
+  host.querySelectorAll("[data-popview]").forEach((b) =>
+    b.addEventListener("click", () => setPopView(b.dataset.popview)));
+}
+
 function renderExampleDetail() {
   const example = state.examples.find((item) => item.id === state.selectedExampleId);
   if (!example) {
     els.exampleDetail.className = "empty";
     els.exampleDetail.textContent = state.examples.length ? "Select a pair." : "No pairs in this run.";
+    return;
+  }
+  if (example.latent && example.video_possible) {
+    const views = availableViews(example);
+    if (!views.includes(state.exploreView)) state.exploreView = "latent";
+    ({
+      latent: renderLatentPlayer,
+      anticipation: renderAnticipationView,
+      dense: renderDenseView,
+    }[state.exploreView] || renderLatentPlayer)(example);
     return;
   }
   if (example.video_possible) {
@@ -481,8 +1239,7 @@ function renderExampleDetail() {
     `Re-run <code>viewer.adapters.intphys_rescore</code> on this run to produce the side-by-side player.</div>`;
 }
 
-// --- Population tab: the headline VoE result, made browsable ---
-
+// Surprise-run summary helper (the VoE chips on Home); latent runs ignore it.
 function populationRows() {
   return state.examples
     .filter((e) => typeof e.metrics?.surprise_gap === "number")
@@ -492,267 +1249,6 @@ function populationRows() {
       gap: e.metrics.surprise_gap,
       correct: e.label !== "wrong" && e.metrics.surprise_gap > 0,
     }));
-}
-
-function gapHistogram(rows) {
-  const gaps = rows.map((r) => r.gap);
-  const absMax = Math.max(1e-6, ...gaps.map((g) => Math.abs(g)));
-  const nBins = 21; // odd so a bin is centered on zero
-  const counts = new Array(nBins).fill(0);
-  const edge = absMax * 1.0001;
-  for (const g of gaps) {
-    let bin = Math.floor(((g + edge) / (2 * edge)) * nBins);
-    bin = Math.min(nBins - 1, Math.max(0, bin));
-    counts[bin] += 1;
-  }
-  const W = 600, H = 180, pad = 28;
-  const maxC = Math.max(1, ...counts);
-  const bw = (W - pad * 2) / nBins;
-  const zeroX = pad + (W - pad * 2) / 2;
-  const bars = counts
-    .map((c, i) => {
-      const h = (c / maxC) * (H - pad * 2);
-      const x = pad + i * bw;
-      const center = -edge + (i + 0.5) * (2 * edge) / nBins;
-      const fill = center > 0 ? "#bd3c3c" : center < 0 ? "#2364aa" : "#888";
-      return `<rect x="${x + 1}" y="${H - pad - h}" width="${Math.max(1, bw - 2)}" height="${h}" fill="${fill}" opacity="0.85"><title>gap≈${center.toFixed(4)} · ${c} pair(s)</title></rect>`;
-    })
-    .join("");
-  return `<svg class="popHist" viewBox="0 0 ${W} ${H}">
-    <line x1="${pad}" y1="${H - pad}" x2="${W - pad}" y2="${H - pad}" stroke="#d9dee6" />
-    <line x1="${zeroX}" y1="${pad - 6}" x2="${zeroX}" y2="${H - pad}" stroke="#444" stroke-dasharray="4 3" />
-    <text x="${zeroX}" y="${pad - 10}" text-anchor="middle" class="axisLabel">gap = 0</text>
-    <text x="${W - pad}" y="${H - 8}" text-anchor="end" class="axisLabel" style="fill:#bd3c3c">impossible more surprising →</text>
-    <text x="${pad}" y="${H - 8}" class="axisLabel" style="fill:#2364aa">← possible more surprising</text>
-    ${bars}</svg>`;
-}
-
-function blockTable(rows) {
-  const byBlock = {};
-  for (const r of rows) {
-    const b = (byBlock[r.block] ||= { n: 0, correct: 0 });
-    b.n += 1;
-    if (r.correct) b.correct += 1;
-  }
-  const blocks = Object.keys(byBlock).sort();
-  if (blocks.length <= 1) return "";
-  return `<table class="popBlocks">
-    <thead><tr><th>block</th><th>pairs</th><th>correct</th><th>accuracy</th></tr></thead>
-    <tbody>${blocks
-      .map((b) => {
-        const { n, correct } = byBlock[b];
-        return `<tr><td>${b}</td><td>${n}</td><td>${correct}</td><td>${(correct / n).toFixed(3)}</td></tr>`;
-      })
-      .join("")}</tbody></table>`;
-}
-
-function sortPopRows(rows) {
-  const s = state.popSort;
-  const copy = [...rows];
-  if (s === "absgap") copy.sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap));
-  else if (s === "gap") copy.sort((a, b) => b.gap - a.gap);
-  else if (s === "id") copy.sort((a, b) => a.id.localeCompare(b.id));
-  return copy;
-}
-
-// The mirror plot: each IntPhys scene contributes two matched pairs; plotting
-// pair-A gap vs pair-B gap shows them piling on the dashed y = −x line where the
-// two gaps cancel — the visual proof that the metric reads appearance, not
-// possibility. Off-line points (orange) are the rare scenes that didn't cancel.
-function mirrorPlot(analysis) {
-  const m = analysis.mirror || [];
-  if (!m.length) return "";
-  const W = 440, H = 440, pad = 46;
-  const lim = Math.max(1e-6, ...m.flat().map(Math.abs)) * 1.05;
-  const sx = (v) => pad + ((v + lim) / (2 * lim)) * (W - 2 * pad);
-  const sy = (v) => H - pad - ((v + lim) / (2 * lim)) * (H - 2 * pad);
-  const pts = m
-    .map(([a, b]) => {
-      const anom = (a > 0) === (b > 0); // same sign => did not cancel
-      return `<circle cx="${sx(a)}" cy="${sy(b)}" r="4" fill="${anom ? "#9a6a13" : "#bd3c3c"}" opacity="0.7"><title>gap_a ${a.toFixed(4)}, gap_b ${b.toFixed(4)}${anom ? " — did NOT cancel" : ""}</title></circle>`;
-    })
-    .join("");
-  return `<svg class="mirrorPlot" viewBox="0 0 ${W} ${H}">
-    <line x1="${sx(-lim)}" y1="${sy(lim)}" x2="${sx(lim)}" y2="${sy(-lim)}" stroke="#444" stroke-dasharray="5 4" />
-    <line x1="${pad}" y1="${sy(0)}" x2="${W - pad}" y2="${sy(0)}" stroke="#e1e5ea" />
-    <line x1="${sx(0)}" y1="${pad}" x2="${sx(0)}" y2="${H - pad}" stroke="#e1e5ea" />
-    <text x="${sx(lim)}" y="${sy(-lim) + 16}" text-anchor="end" class="axisLabel">y = −x (gaps cancel)</text>
-    <text x="${W - pad}" y="${sy(0) - 6}" text-anchor="end" class="axisLabel">pair A gap →</text>
-    <text x="${sx(0) + 6}" y="${pad - 2}" class="axisLabel">pair B gap ↑</text>
-    ${pts}</svg>`;
-}
-
-function analysisSummary(a) {
-  const beats = a.accuracy_localized > a.accuracy_motion;
-  return `<div class="popHeadline">
-      <div class="popAcc">
-        <span class="popAccBig">${a.accuracy_localized.toFixed(3)}</span>
-        <span class="popAccSub">${a.n_pairs} pairs · violation-localized</span>
-      </div>
-      <div class="popAccNote">
-        Model-free <strong>motion baseline ${a.accuracy_motion.toFixed(3)}</strong> — the localized
-        surprise ${beats ? "beats" : "does <strong>not</strong> beat"} it. Within-scene anti-symmetry
-        <strong>${(a.anti_symmetry_pct * 100).toFixed(0)}%</strong>: in most scenes the two pair-gaps
-        are mirror images that cancel, so the metric reads appearance, not physics. Each dot below is
-        one scene's two gaps; they pile on the dashed <em>y = −x</em> line where they cancel. The few
-        orange points are scenes that didn't.
-      </div>
-    </div>
-    <div class="mirrorWrap">${mirrorPlot(a)}</div>`;
-}
-
-function renderPopulation() {
-  const rows = populationRows();
-  const analysis = state.manifest?.analysis;
-  els.populationEmpty.style.display = rows.length ? "none" : "grid";
-  els.populationBody.style.display = rows.length ? "block" : "none";
-  if (!rows.length) {
-    els.populationBody.innerHTML = "";
-    return;
-  }
-  const run = state.manifest?.run || {};
-  const provenance = [
-    run.commit ? `commit ${run.commit}` : "",
-    run.command ? `<code>${run.command}</code>` : "",
-  ].filter(Boolean).join(" · ");
-
-  const list = sortPopRows(rows)
-    .map(
-      (r) => `<button class="popRow" data-example="${r.id}">
-        <span class="popId">${r.id}</span>
-        <span class="popBlock">${r.block}</span>
-        <span class="popGap ${r.gap > 0 ? "pos" : "neg"}">${r.gap >= 0 ? "+" : ""}${r.gap.toFixed(4)}</span>
-        <span class="popMark">${r.correct ? "✓" : "✗"}</span>
-      </button>`
-    )
-    .join("");
-  const sortControl = `<div class="popListHead">
-      <span>${analysis ? "curated examples — click to inspect with overlays" : rows.length + " pairs · click a row to open its player"}</span>
-      <label>sort
-        <select id="popSortSel">
-          <option value="absgap">|gap| (most decisive)</option>
-          <option value="gap">gap (impossible − possible)</option>
-          <option value="id">id</option>
-        </select>
-      </label>
-    </div>`;
-
-  let head;
-  if (analysis) {
-    head = analysisSummary(analysis);
-  } else {
-    const n = rows.length;
-    const nCorrect = rows.filter((r) => r.correct).length;
-    head = `<div class="popHeadline">
-        <div class="popAcc">
-          <span class="popAccBig">${(nCorrect / n).toFixed(3)}</span>
-          <span class="popAccSub">${nCorrect}/${n} pairs · impossible &gt; possible</span>
-        </div>
-        <div class="popAccNote">
-          Chance is <strong>0.500</strong>. VoE accuracy near chance means ViT-L surprise barely
-          separates physically impossible from possible — the headline negative result, per SOUL.md.
-          Gaps are tiny: the distribution below is centered on zero.
-        </div>
-      </div>
-      ${gapHistogram(rows)}
-      ${blockTable(rows)}`;
-  }
-
-  els.populationBody.innerHTML = head + sortControl
-    + `<div class="popList">${list}</div>`
-    + (provenance ? `<p class="popProvenance">${provenance}</p>` : "");
-
-  const sel = els.populationBody.querySelector("#popSortSel");
-  if (sel) {
-    sel.value = state.popSort;
-    sel.addEventListener("change", () => {
-      state.popSort = sel.value;
-      renderPopulation();
-    });
-  }
-}
-
-// --- Inventory tab: curation queue + quantitative diagnostics ---
-
-function inventoryItems() {
-  const filter = (els.inventoryFilter?.value || "").trim().toLowerCase();
-  const view = els.inventoryView?.value || "all";
-  return [...(state.inventory?.items || [])]
-    .filter((item) => {
-      if (view === "motion" && !item.motion_agrees_with_localized) return false;
-      if (view === "unreviewed" && item.visual_status !== "unreviewed") return false;
-      if (view === "metadata" && item.metadata_quality === "complete") return false;
-      if (!filter) return true;
-      const haystack = [
-        item.spec,
-        item.family,
-        item.scene,
-        item.motion_direction,
-        item.scene_pair_sign,
-        item.metadata_quality,
-        item.visual_status,
-        item.violation_type,
-        item.object_type,
-      ].join(" ").toLowerCase();
-      return haystack.includes(filter);
-    })
-    .sort((a, b) => {
-      if (a.motion_agrees_with_localized !== b.motion_agrees_with_localized) {
-        return a.motion_agrees_with_localized ? -1 : 1;
-      }
-      return Math.abs(b.localized_gap || 0) - Math.abs(a.localized_gap || 0);
-    });
-}
-
-function renderInventory() {
-  const summary = state.inventory?.summary || {};
-  const items = inventoryItems();
-  const hasInventory = Boolean(state.inventory?.items?.length);
-  els.inventoryEmpty.style.display = hasInventory ? "none" : "grid";
-  els.inventoryBody.style.display = hasInventory ? "block" : "none";
-  if (!hasInventory) {
-    els.inventoryBody.innerHTML = "";
-    return;
-  }
-
-  const familyText = Object.entries(summary.families || {})
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(" · ");
-  const motionAligned = summary.motion_agrees_with_localized || 0;
-  const maskAvailable = summary.mask_available || 0;
-  const rows = items.map((item) => {
-    const metadataBad = item.metadata_quality !== "complete";
-    const reviewStatus = statusLabel(item.visual_status);
-    return `<button class="invRow" data-example="${item.spec}">
-        <span class="invSpec">${item.spec}</span>
-        <span>${item.family}</span>
-        <span>${item.motion_agrees_with_localized ? "motion-aligned" : "motion-opposes"}</span>
-        <span>${formatValue(item.localized_gap)}</span>
-        <span>${formatValue(item.motion_diff)}</span>
-        <span>${item.mask_available ? `${item.mask_active_peak} peak` : "none"}</span>
-        <span class="${metadataBad ? "invWarn" : ""}">${item.metadata_quality}</span>
-        <span>${reviewStatus}</span>
-      </button>`;
-  }).join("");
-
-  els.inventoryBody.innerHTML = `
-    <div class="invSummary">
-      <span class="statChip"><strong>${summary.n_items || 0}</strong> inventory cases</span>
-      <span class="statChip">${familyText || "families unknown"}</span>
-      <span class="statChip"><strong>${maskAvailable}</strong> with masks</span>
-      <span class="statChip"><strong>${motionAligned}</strong> motion-aligned candidates</span>
-    </div>
-    <div class="invHead">
-      <span>${items.length} shown · human review fields start empty until curated</span>
-      <span><code>inventory.json</code> + <code>inventory.csv</code></span>
-    </div>
-    <div class="invTable">
-      <div class="invHeader">
-        <span>case</span><span>family</span><span>motion</span><span>localized gap</span>
-        <span>motion diff</span><span>mask</span><span>metadata</span><span>human review</span>
-      </div>
-      ${rows || `<div class="empty">No rows match this filter.</div>`}
-    </div>`;
 }
 
 function renderHome() {
@@ -766,6 +1262,19 @@ function renderHome() {
       <span class="statChip">${a.n_pairs} analysis pairs</span>
       <span class="statChip">violation-localized <strong>${a.accuracy_localized.toFixed(3)}</strong> vs motion <strong>${a.accuracy_motion.toFixed(3)}</strong></span>
       <span class="statChip">within-scene anti-symmetry <strong>${(a.anti_symmetry_pct * 100).toFixed(0)}%</strong></span>`;
+    return;
+  }
+  // Latent-surface runs carry no surprise_gap; summarize the latent read instead.
+  if (state.examples.some((e) => e.latent)) {
+    const lat = state.examples.filter((e) => e.latent);
+    const above = lat.filter((e) => e.label === "above null").length;
+    const ranks = lat.map((e) => e.metrics?.min_eff_rank_imp).filter((v) => typeof v === "number");
+    const medRank = ranks.length ? ranks.slice().sort((a, b) => a - b)[Math.floor(ranks.length / 2)] : null;
+    els.homeStats.innerHTML = `
+      <span class="statChip">Current run: <strong>${run.id || "—"}</strong> · latent surface</span>
+      <span class="statChip">${lat.length} pairs</span>
+      <span class="statChip"><strong>${above}/${lat.length}</strong> exceed within-scene null</span>
+      ${medRank !== null ? `<span class="statChip">median min effective rank <strong>${medRank.toFixed(1)}</strong> / 1024</span>` : ""}`;
     return;
   }
   const rows = populationRows();
@@ -789,8 +1298,6 @@ function renderAll() {
   renderExampleList();
   renderExampleDetail();
   renderHome();
-  renderPopulation();
-  renderInventory();
 }
 
 async function loadRuns() {
@@ -828,6 +1335,7 @@ async function loadManifest(runId) {
 function activateTab(name) {
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.tab === name));
   document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("is-active", panel.id === name));
+  if (name === "population") renderPopulation();   // population content is built on demand
 }
 
 document.querySelector(".tabs").addEventListener("click", (event) => {
@@ -839,8 +1347,6 @@ document.querySelector(".tabs").addEventListener("click", (event) => {
 els.runSelect.addEventListener("change", () => loadManifest(els.runSelect.value));
 els.exampleFilter.addEventListener("input", renderExampleList);
 els.metricSort.addEventListener("change", renderExampleList);
-els.inventoryFilter.addEventListener("input", renderInventory);
-els.inventoryView.addEventListener("change", renderInventory);
 els.exampleList.addEventListener("click", (event) => {
   const button = event.target.closest("[data-example]");
   if (!button) return;
@@ -848,25 +1354,35 @@ els.exampleList.addEventListener("click", (event) => {
   renderExampleList();
   renderExampleDetail();
 });
-els.populationBody.addEventListener("click", (event) => {
-  const row = event.target.closest("[data-example]");
-  if (!row) return;
-  state.selectedExampleId = row.dataset.example;
-  activateTab("examples");
-  renderExampleList();
-  renderExampleDetail();
-});
-els.inventoryBody.addEventListener("click", (event) => {
-  const row = event.target.closest("[data-example]");
-  if (!row) return;
-  state.selectedExampleId = row.dataset.example;
-  activateTab("examples");
-  renderExampleList();
-  renderExampleDetail();
-});
+
+// Deep-link the active tab via the URL hash (#examples) so a view is shareable
+// and reload-stable.
+const TAB_NAMES = ["home", "examples", "population"];
+// `#examples`, `#examples:dense`, or `#population:map` — optionally deep-links a view.
+function tabFromHash() {
+  const [name, view] = (location.hash || "").replace(/^#/, "").split(":");
+  // Legacy links: probes/map used to live under #examples; they're now Population.
+  if (name === "examples" && (view === "probes" || view === "map")) {
+    state.popView = view;
+    activateTab("population");
+    return;
+  }
+  if (name === "population") {
+    if (view === "probes" || view === "map") state.popView = view;
+    activateTab("population");
+    return;
+  }
+  if (TAB_NAMES.includes(name)) activateTab(name);
+  if (view && view !== state.exploreView) {
+    state.exploreView = view;
+    renderExampleDetail();
+  }
+}
+window.addEventListener("hashchange", tabFromHash);
 
 loadRuns()
   .then(() => loadManifest(state.runId))
+  .then(tabFromHash)
   .catch((error) => {
     els.runMeta.textContent = error.message;
   });

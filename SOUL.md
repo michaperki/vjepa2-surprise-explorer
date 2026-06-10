@@ -58,6 +58,8 @@ The current frontier of this program — LeJEPA, the identifiability proofs, the
 
 **9. Don't excuse a result with an experiment you didn't run.** "A bigger model would probably fix this" is an untested assumption wearing the costume of a mitigation. We run **ViT-L deliberately** — it's the model that fits the hardware, and the honest question is whether *this* model shows the effect, not whether some hypothetical larger one would. If the counterfactual matters, run it or state it explicitly as an open question; never let it soften a negative result by implication. A negative result is allowed to be negative. The hedge that quietly converts "it didn't work" into "it would have worked with more compute" is exactly the rhetorical work rule 7 forbids.
 
+**10. Small run first; never clobber a finished one.** A full pass over all 180 IntPhys clips takes **hours**. So when you add a new feature, extraction, metric, or view, validate it on a **small real run first** (`--limit`/`--pairs`, a few scenes) so the new UI is viewable with *real* data and you can iterate in minutes — not by waiting on the full run and discovering the new panel is broken at the end. Separate the expensive part from the cheap part: extract once, then iterate analysis/views for free on the cache (`--recompute-null`). And **completed runs are precious** — a small test run must never overwrite a finished full run. Test runs get their own `--out` (e.g. `runs/<name>_smoke`); writing into an existing run requires an explicit `--force`. The full run is the human's expensive artifact (rule 8); treat it as read-only until they say otherwise.
+
 ## What "good" looks like here
 
 - A claim, stated precisely, with its assumptions.

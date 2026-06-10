@@ -1,13 +1,16 @@
-# V-JEPA 2 Surprise Explorer
+# V-JEPA 2 Surprise & Latent-Surface Explorer
 
-### ▶ Live demo — **https://michaperki.github.io/vjepa2-surprise-explorer/**
+### ▶ Live demo (surprise explorer) — **https://michaperki.github.io/vjepa2-surprise-explorer/**
 
-An interactive explorer for a single question: when a video shows something
+An interactive explorer for one question: when a video shows something
 **physically impossible** — an object passing through a wall, or vanishing behind
-one and never coming back — does V-JEPA 2 notice? We read out the model's own
-**"surprise"** (how wrong its prediction of what comes next turns out to be, in
-representation space rather than pixels) and let you *watch* it light up on the
-actual frames.
+one and never coming back — what does V-JEPA 2's world model *do*? We read that out
+two complementary ways and let you *watch* it on the actual frames:
+
+- **Surprise** — how wrong the model's prediction of the next moment is, in
+  representation space rather than pixels (the established result below).
+- **Latent surface** — how the representation *itself* moves, splits, or collapses
+  through the clip: an in-progress *identifiability* lens (`vjepa2/LATENT_SURFACE.md`).
 
 ## The finding, in one line
 
@@ -19,40 +22,60 @@ specific to **this checkpoint (V-JEPA 2 ViT-L)**: the *same* pipeline reproduces
 the published ~92% on a different checkpoint. The explorer is what makes the result
 legible — you can see surprise following motion instead of impossibility.
 
-## What's in the explorer
+## What's in the viewer
 
-- **Home** — the plain-language story and the headline number.
-- **Examples** — the keeper view: a matched possible/impossible pair playing in
-  lockstep, the model's surprise drawn underneath as a curve with a playhead, a
-  per-patch **surprise heatmap** you can toggle onto the frames, and an honest
-  pixel-difference band (what's *visually* different, which is **not** necessarily
-  where the physics breaks).
-- **Population** — the headline result made browsable: accuracy vs. chance, the
-  per-pair gap histogram, and the within-scene mirror plot showing how the two
-  gaps in each scene cancel.
-- **Inventory** — per-case diagnostics and a human-review queue.
+Two tabs, **Home** (the story + this run's live stats) and **Explore**. A matched
+possible/impossible pair plays in lockstep with the model's reaction drawn
+underneath. A surprise run shows the surprise readout; a latent-surface run adds a
+**view switcher** (deep-linked as `#examples:<view>`) over its lenses — *Latent
+surface*, *Probes* (linear decodability vs a shuffle null, with layerwise emergence
+and a motion-partialled control), *Anticipation* (the predictor's output vs the
+actual future), and *Dense features* (per-clip PCA patch segmentation). The two
+base readouts:
+
+- **Surprise readout** — the surprise curve with a playhead, a per-patch
+  **surprise heatmap** you can toggle onto the frames, and an honest
+  pixel-difference band (what's *visually* different, **not** necessarily where the
+  physics breaks).
+- **Latent surface** — a shared-PCA **map** of both clips' representation
+  trajectories (watch them share a path, then split), plus rails for **effective
+  rank** (collapse), **latent velocity vs pixel flow** (motion or reorganization?),
+  and **possible−impossible divergence** against a within-scene null — with a
+  **localized divergence heatmap** showing *where on the frame* the representations
+  differ. This is exploratory; no latent result is claimed yet (see
+  `vjepa2/LATENT_SURFACE.md`).
 
 ## Run it locally
 
-The published site is self-contained — no backend, no build step. Serve the
-`docs/` folder and open it:
+The published `docs/` site (the **surprise explorer**) is self-contained — no
+backend, no build step. Serve the folder and open it:
 
 ```bash
 cd docs
 python3 -m http.server 8000   # then open http://localhost:8000
 ```
 
+To browse a local run (surprise **or** latent surface) with the live viewer:
+
+```bash
+cd vjepa2
+PYTHONPATH=. python3 viewer/serve.py --run runs/<your_run>   # open #examples
+```
+
 ## Layout
 
 ```
-docs/                       the static Pages site (self-contained)
+docs/                       the static Pages site (the published surprise explorer)
   index.html app.js style.css
-  data/<run>/manifest.json   slimmed per-pair surprise curves + heatmaps
+  data/<run>/manifest.json   slimmed per-pair curves/surfaces + heatmaps
   data/<run>/assets/         model-cropped MP4s of each clip pair
 vjepa2/
-  surprise_engine.py         the prediction-error / "surprise" readout
+  surprise_engine.py         the prediction-error readout + latent_state (pooled + rank + spatial)
   run_*.py                   the probes, scorers, and audits
   viewer/                    viewer source + static export (build_static.py)
+    adapters/intphys_rescore.py   the surprise re-score adapter
+    adapters/latent_surface.py    the latent-surface adapter (+ --recompute-null)
+  LATENT_SURFACE.md          the latent-surface method, schema, and open questions
   *.md                       method writeups (CROSS_CHECK, NULL_CONTROLS, ...)
   outputs/  figures/         analysis records and result plots
 SOUL.md                      why this project exists and the standard it holds to
@@ -66,19 +89,24 @@ here:
 
 ```bash
 git clone https://github.com/facebookresearch/vjepa2.git
-# drop this repo's vjepa2/*.py and vjepa2/viewer/ alongside it, add a checkpoint,
-# then re-score and rebuild the static site:
+# drop this repo's vjepa2/*.py and vjepa2/viewer/ alongside it, add a checkpoint, then:
+
+# surprise explorer (rebuilds the published static site):
 PYTHONPATH=. python3 -m viewer.adapters.violation_review --out runs/violation_review_all --weights-dtype bf16
 PYTHONPATH=. python3 -m viewer.build_static --run runs/violation_review_all --out ../docs
+
+# latent surface (use --limit/--pairs for a quick sample; --recompute-null re-derives
+# the nulls on CPU from the cached embeddings, no model reload):
+PYTHONPATH=. python3 -m viewer.adapters.latent_surface --all --out runs/latent_surface --weights-dtype bf16
 ```
 
-See `vjepa2/VIEWER.md` for the manifest contract and the full adapter/viewer
-workflow.
+See `vjepa2/VIEWER.md` for the manifest contract and `vjepa2/LATENT_SURFACE.md` for
+the latent-surface workflow.
 
 ## Attribution
 
 The model and its source code are **V-JEPA 2 by Meta AI**
 ([facebookresearch/vjepa2](https://github.com/facebookresearch/vjepa2)). This
-repository contains only the surprise-analysis code and the explorer built on top
-of it; it does not redistribute Meta's source tree. Stimuli are from the
-[IntPhys](https://www.intphys.com/) benchmark.
+repository contains only the surprise- and latent-analysis code and the explorer
+built on top of it; it does not redistribute Meta's source tree. Stimuli are from
+the [IntPhys](https://www.intphys.com/) benchmark.
